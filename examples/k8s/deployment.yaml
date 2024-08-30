@@ -1,0 +1,140 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: java-opts
+  labels:
+    app: java-app
+data:
+  jvm.options: |
+    # General settings
+    
+    -XX:-OmitStackTraceInFastThrow
+    
+    #----------------------------------------------------------------
+    
+    # Memory Settings
+    # Xms represents the initial size of total heap space
+    #
+    # Xmx represents the maximum size of total heap space. 
+    # Default is 2 GB which is fine for small installations. 
+    # For medium or large installation this value has to be increased.
+    # The heap space can be monitored in the Engine Cockpit. 
+    # Have a look at Monitor > Engine > Memory
+    
+    -Xms1g
+    -Xmx1g
+    -Xmn50m
+    -Xss1m
+    -XX:MetaspaceSize=512m
+    -XX:MaxMetaspaceSize=512m
+    -XX:+AlwaysPreTouch
+    
+    #----------------------------------------------------------------
+    
+    # Headless mode
+    # no X11 environment is required
+    
+    -Djava.awt.headless=true
+    -Dfile.encoding=UTF-8
+    -Djava.security.egd=file:/dev/./urandom
+    -Djava.net.preferIPv4Stack=true
+    -Dsun.net.client.defaultConnectTimeout=2000
+    -Dsun.net.client.defaultReadTimeout=2000
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: java-entrypoint
+  labels:
+    app: java-app
+data:
+  server.sh: |
+    #!/bin/bash
+    set -euxo pipefail
+    url="https://github.com/dyrnq/JvmOptionsParser/releases/download/v0.0.1/JvmOptionsParser.jar";
+    url="${url/github.com/mirror.ghproxy.com/github.com}"
+    curl -fsSL --retry 10 -o /tmp/JvmOptionsParser.jar "${url}"
+    jvm_opts=$(java -jar /tmp/JvmOptionsParser.jar /etc/app/conf)
+    echo $jvm_opts;
+    exec java $jvm_opts -jar app.jar
+  inotify-wait.sh: |
+    #!/bin/bash
+    while :
+      do
+        # 获取文件名称
+        REAL=`readlink -f ${FILE}`
+        # 监控指定事件
+        inotifywait -e delete_self "${REAL}"
+        # 获取特定进程名称的 PID
+        PID=`pgrep ${PROCESS} | head -1`
+        # 发送信号
+        kill "-${SIGNAL}" "${PID}"
+      done
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: java-app
+spec:
+  selector:
+    matchLabels:
+      app: java-app
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: java-app
+    spec:
+      shareProcessNamespace: true
+      containers:
+        - image: dyrnq/hello-springboot-docker
+          imagePullPolicy: IfNotPresent
+          command:
+            - /utils/server.sh
+          name: java-app
+          env:
+            - name: ES_JAVA_OPTS
+              value: "-Duser.timezone=Asia/Shanghai"
+          ports:
+            - containerPort: 7001
+              name: http
+          volumeMounts:
+            - name: java-opts
+              mountPath: /etc/app/conf
+              readOnly: true
+            - name: utils
+              mountPath: /utils
+              readOnly: true
+        - image: dyrnq/inotify-tools
+          imagePullPolicy: IfNotPresent
+          command:
+            - /utils/inotify-wait.sh
+          name: cm-reload
+          securityContext:
+            capabilities:
+              add:
+                - SYS_PTRACE
+          env:
+            - name: FILE
+              value: "/etc/app/conf/jvm.options"
+            - name: PROCESS
+              value: "java"
+            - name: SIGNAL
+              value: "SIGTERM"
+          volumeMounts:
+            - name: java-opts
+              mountPath: /etc/app/conf
+              readOnly: true
+            - name: utils
+              mountPath: /utils
+              readOnly: true
+      volumes:
+        - name: java-opts
+          configMap:
+            name: java-opts
+        - name: utils
+          configMap:
+            name: java-entrypoint
+            defaultMode: 0755
